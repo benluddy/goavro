@@ -13,6 +13,10 @@ import (
 	"fmt"
 )
 
+const absentFullName = "io.k8s.avro.Absent"
+
+type absent map[string]interface{}
+
 func makeRecordCodec(st map[string]*Codec, enclosingNamespace string, schemaMap map[string]interface{}, cb *codecBuilder) (*Codec, error) {
 	// NOTE: To support recursive data types, create the codec and register it
 	// using the specified name, and fill in the codec functions later.
@@ -112,10 +116,14 @@ func makeRecordCodec(st map[string]*Codec, enclosingNamespace string, schemaMap 
 				if defaultValue == "null" {
 					defaultValue = nil
 				}
-				// NOTE: To support record field default values, union schema
-				// set to the type name of first member
-				// TODO: change to schemaCanonical below
-				defaultValue = Union(fieldCodec.schemaOriginal, defaultValue)
+
+				// hack
+				for _, defaultSchema := range fieldSchemaMap["type"].([]interface{}) {
+					if defaultSchemaMap, ok := defaultSchema.(map[string]interface{}); ok && defaultSchemaMap["name"] == "io.k8s.avro.Absent" {
+						defaultValue = absent(defaultValue.(map[string]interface{}))
+					}
+					break
+				}
 			default:
 				debug("fieldName: %q; type: %q; defaultValue: %T(%#v)\n", fieldName, c.typeName, defaultValue, defaultValue)
 			}
@@ -162,6 +170,15 @@ func makeRecordCodec(st map[string]*Codec, enclosingNamespace string, schemaMap 
 		return buf, nil
 	}
 
+	if c.typeName.fullName == absentFullName {
+		c.binaryFromNative = func(buf []byte, datum interface{}) ([]byte, error) {
+			if _, ok := datum.(absent); !ok {
+				return nil, fmt.Errorf("expected absent, got %T", datum)
+			}
+			return buf, nil
+		}
+	}
+
 	c.nativeFromBinary = func(buf []byte) (interface{}, []byte, error) {
 		recordMap := make(map[string]interface{}, len(codecFromIndex))
 		for i, fieldCodec := range codecFromIndex {
@@ -172,9 +189,17 @@ func makeRecordCodec(st map[string]*Codec, enclosingNamespace string, schemaMap 
 			if err != nil {
 				return nil, nil, fmt.Errorf("cannot decode binary record %q field %q: %s", c.typeName, name, err)
 			}
-			recordMap[name] = value
+			if _, ok := value.(absent); !ok {
+				recordMap[name] = value
+			}
 		}
 		return recordMap, buf, nil
+	}
+
+	if c.typeName.fullName == absentFullName {
+		c.nativeFromBinary = func(buf []byte) (interface{}, []byte, error) {
+			return absent(nil), buf, nil
+		}
 	}
 
 	c.nativeFromTextual = func(buf []byte) (interface{}, []byte, error) {

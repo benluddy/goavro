@@ -24,6 +24,14 @@ type codecInfo struct {
 	codecFromIndex []*Codec
 	codecFromName  map[string]*Codec
 	indexFromName  map[string]int
+
+	recordOrMapIndex int
+	absentIndex      int
+	booleanIndex     int
+	longIndex        int
+	doubleIndex      int
+	stringIndex      int
+	arrayIndex       int
 }
 
 // Union wraps a datum value in a map for encoding as a Union, as required by
@@ -63,6 +71,8 @@ func makeCodecInfo(st map[string]*Codec, enclosingNamespace string, schemaArray 
 	codecFromName := make(map[string]*Codec, len(schemaArray))
 	indexFromName := make(map[string]int, len(schemaArray))
 
+	var recordIndex int = -1
+
 	for i, unionMemberSchema := range schemaArray {
 		unionMemberCodec, err := buildCodec(st, enclosingNamespace, unionMemberSchema, cb)
 		if err != nil {
@@ -72,18 +82,69 @@ func makeCodecInfo(st map[string]*Codec, enclosingNamespace string, schemaArray 
 		if _, ok := indexFromName[fullName]; ok {
 			return codecInfo{}, fmt.Errorf("Union item %d ought to be unique type: %s", i+1, unionMemberCodec.typeName)
 		}
+		if unionMemberSchemaMap, ok := unionMemberSchema.(map[string]interface{}); ok && fullName != absentFullName {
+			if stype, ok := unionMemberSchemaMap["type"].(string); ok {
+				switch stype {
+				case "record":
+					if recordIndex >= 0 {
+						return codecInfo{}, fmt.Errorf("Union item %d and %d are both records so this implementation won't support this schema", recordIndex+1, i+1)
+					}
+					recordIndex = i
+				case "fixed":
+					panic("not implemented")
+				case "enum":
+					panic("not implemented")
+				}
+			}
+		}
+
 		allowedTypes[i] = fullName
 		codecFromIndex[i] = unionMemberCodec
 		codecFromName[fullName] = unionMemberCodec
 		indexFromName[fullName] = i
 	}
 
-	return codecInfo{
+	ci := codecInfo{
 		allowedTypes:   allowedTypes,
 		codecFromIndex: codecFromIndex,
 		codecFromName:  codecFromName,
 		indexFromName:  indexFromName,
-	}, nil
+
+		recordOrMapIndex: recordIndex,
+		absentIndex:      -1,
+		booleanIndex:     -1,
+		longIndex:        -1,
+		doubleIndex:      -1,
+		stringIndex:      -1,
+		arrayIndex:       -1,
+	}
+
+	if index, ok := indexFromName[absentFullName]; ok {
+		ci.absentIndex = index
+	}
+	if index, ok := indexFromName["boolean"]; ok {
+		ci.booleanIndex = index
+	}
+	if index, ok := indexFromName["long"]; ok {
+		ci.longIndex = index
+	}
+	if index, ok := indexFromName["double"]; ok {
+		ci.doubleIndex = index
+	}
+	if index, ok := indexFromName["string"]; ok {
+		ci.stringIndex = index
+	}
+	if index, ok := indexFromName["array"]; ok {
+		ci.arrayIndex = index
+	}
+	if index, ok := indexFromName["map"]; ok {
+		if recordIndex >= 0 {
+			return codecInfo{}, fmt.Errorf("Union item %d (record) and %d (map) can't be conveniently discriminated so this implementation won't support this schema", recordIndex+1, index+1)
+		}
+		ci.recordOrMapIndex = index
+	}
+
+	return ci, nil
 
 }
 
@@ -106,14 +167,10 @@ func unionNativeFromBinary(cr *codecInfo) func(buf []byte) (interface{}, []byte,
 		if err != nil {
 			return nil, nil, fmt.Errorf("cannot decode binary union item %d: %s", index+1, err)
 		}
-		if decoded == nil {
-			// do not wrap a nil value in a map
-			return nil, buf, nil
-		}
-		// Non-nil values are wrapped in a map with single key set to type name of value
-		return Union(cr.allowedTypes[index], decoded), buf, nil
+		return decoded, buf, nil
 	}
 }
+
 func unionBinaryFromNative(cr *codecInfo) func(buf []byte, datum interface{}) ([]byte, error) {
 	return func(buf []byte, datum interface{}) ([]byte, error) {
 		switch v := datum.(type) {
@@ -123,20 +180,54 @@ func unionBinaryFromNative(cr *codecInfo) func(buf []byte, datum interface{}) ([
 				return nil, fmt.Errorf("cannot encode binary union: no member schema types support datum: allowed types: %v; received: %T", cr.allowedTypes, datum)
 			}
 			return longBinaryFromNative(buf, index)
+		case absent:
+			index := cr.absentIndex
+			if index < 0 {
+				return nil, fmt.Errorf("cannot encode binary union: no member schema types support datum: allowed types: %v; received: %T", cr.allowedTypes, datum)
+			}
+			return longBinaryFromNative(buf, index)
+		case bool:
+			index := cr.booleanIndex
+			if index < 0 {
+				return nil, fmt.Errorf("cannot encode binary union: no member schema types support datum: allowed types: %v; received: %T", cr.allowedTypes, datum)
+			}
+			buf, _ = longBinaryFromNative(buf, index)
+			return cr.codecFromIndex[index].binaryFromNative(buf, v)
+		case int64:
+			index := cr.longIndex
+			if index < 0 {
+				return nil, fmt.Errorf("cannot encode binary union: no member schema types support datum: allowed types: %v; received: %T", cr.allowedTypes, datum)
+			}
+			buf, _ = longBinaryFromNative(buf, index)
+			return cr.codecFromIndex[index].binaryFromNative(buf, v)
+		case float64:
+			index := cr.doubleIndex
+			if index < 0 {
+				return nil, fmt.Errorf("cannot encode binary union: no member schema types support datum: allowed types: %v; received: %T", cr.allowedTypes, datum)
+			}
+			buf, _ = longBinaryFromNative(buf, index)
+			return cr.codecFromIndex[index].binaryFromNative(buf, v)
+		case string:
+			index := cr.stringIndex
+			if index < 0 {
+				return nil, fmt.Errorf("cannot encode binary union: no member schema types support datum: allowed types: %v; received: %T", cr.allowedTypes, datum)
+			}
+			buf, _ = longBinaryFromNative(buf, index)
+			return cr.codecFromIndex[index].binaryFromNative(buf, v)
+		case []interface{}:
+			index := cr.arrayIndex
+			if index < 0 {
+				return nil, fmt.Errorf("cannot encode binary union: no member schema types support datum: allowed types: %v; received: %T", cr.allowedTypes, datum)
+			}
+			buf, _ = longBinaryFromNative(buf, index)
+			return cr.codecFromIndex[index].binaryFromNative(buf, v)
 		case map[string]interface{}:
-			if len(v) != 1 {
-				return nil, fmt.Errorf("cannot encode binary union: non-nil Union values ought to be specified with Go map[string]interface{}, with single key equal to type name, and value equal to datum value: %v; received: %T", cr.allowedTypes, datum)
+			index := cr.recordOrMapIndex
+			if index < 0 {
+				return nil, fmt.Errorf("cannot encode binary union: no member schema types support datum: allowed types: %v; received: %T", cr.allowedTypes, datum)
 			}
-			// will execute exactly once
-			for key, value := range v {
-				index, ok := cr.indexFromName[key]
-				if !ok {
-					return nil, fmt.Errorf("cannot encode binary union: no member schema types support datum: allowed types: %v; received: %T", cr.allowedTypes, datum)
-				}
-				c := cr.codecFromIndex[index]
-				buf, _ = longBinaryFromNative(buf, index)
-				return c.binaryFromNative(buf, value)
-			}
+			buf, _ = longBinaryFromNative(buf, index)
+			return cr.codecFromIndex[index].binaryFromNative(buf, v)
 		}
 		return nil, fmt.Errorf("cannot encode binary union: non-nil Union values ought to be specified with Go map[string]interface{}, with single key equal to type name, and value equal to datum value: %v; received: %T", cr.allowedTypes, datum)
 	}

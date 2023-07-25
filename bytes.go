@@ -43,11 +43,22 @@ func bytesNativeFromBinary(buf []byte) (interface{}, []byte, error) {
 }
 
 func stringNativeFromBinary(buf []byte) (interface{}, []byte, error) {
-	d, b, err := bytesNativeFromBinary(buf)
-	if err != nil {
-		return nil, nil, fmt.Errorf("cannot decode binary string: %s", err)
+	if len(buf) < 1 {
+		return nil, nil, fmt.Errorf("cannot decode binary bytes: %s", io.ErrShortBuffer)
 	}
-	return string(d.([]byte)), b, nil
+	var decoded interface{}
+	var err error
+	if decoded, buf, err = longNativeFromBinary(buf); err != nil {
+		return nil, nil, fmt.Errorf("cannot decode binary bytes: %s", err)
+	}
+	size := decoded.(int64) // always returns int64
+	if size < 0 {
+		return nil, nil, fmt.Errorf("cannot decode binary bytes: negative size: %d", size)
+	}
+	if size > int64(len(buf)) {
+		return nil, nil, fmt.Errorf("cannot decode binary bytes: %s", io.ErrShortBuffer)
+	}
+	return string(buf[:size]), buf[size:], nil
 }
 
 ////////////////////////////////////////
